@@ -13,7 +13,8 @@
       "settlement_rule": "equal",
       "member_count": 0,
       "last_processed_message_id": "1575383023795441835",
-      "last_daily_noon_date": ""
+      "last_daily_noon_date": "",
+      "personal_budgets": {}
     }
   }
 }
