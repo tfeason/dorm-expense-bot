@@ -8,11 +8,35 @@
           "note": "一般支出",
           "time_str": "11/26 13:29",
           "timestamp": "2026-11-26T13:29:41.277743+08:00"
+        },
+        {
+          "payer": "小澄",
+          "payer_id": "976047375984508928",
+          "amount": 10.0,
+          "note": "一般支出",
+          "time_str": "11/26 13:40",
+          "timestamp": "2026-11-26T13:40:24.380447+08:00"
+        },
+        {
+          "payer": "小澄",
+          "payer_id": "976047375984508928",
+          "amount": 33.0,
+          "note": "一般支出",
+          "time_str": "11/26 13:40",
+          "timestamp": "2026-11-26T13:40:24.380447+08:00"
+        },
+        {
+          "payer": "小澄",
+          "payer_id": "976047375984508928",
+          "amount": 88.0,
+          "note": "一般支出",
+          "time_str": "11/26 13:40",
+          "timestamp": "2026-11-26T13:40:24.380447+08:00"
         }
       ],
       "settlement_rule": "equal",
       "member_count": 0,
-      "last_processed_message_id": "1575383023795441835",
+      "last_processed_message_id": "1575384581916327960",
       "last_daily_noon_date": "",
       "personal_budgets": {}
     }
