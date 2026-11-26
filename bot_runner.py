@@ -10,6 +10,30 @@ DEFAULT_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "").strip()
 DATA_FILE = "dorm_data.json"
 API_BASE = "https://discord.com/api/v10"
 TW_TZ = timezone(timedelta(hours=8))
+CRON_INTERVAL_MINUTES = 5
+
+
+def build_read_progress_bar(now_tw=None):
+    if now_tw is None:
+        now_tw = datetime.now(TW_TZ)
+
+    interval = CRON_INTERVAL_MINUTES
+    seconds_in_cycle = interval * 60
+    elapsed_seconds = ((now_tw.minute % interval) * 60) + now_tw.second
+    ratio = min(max(elapsed_seconds / seconds_in_cycle, 0.0), 1.0)
+    pct = int(round(ratio * 100))
+
+    bar_len = 12
+    filled = min(bar_len, int(round(ratio * bar_len)))
+    bar = "█" * filled + "░" * (bar_len - filled)
+
+    next_min_total = ((now_tw.minute // interval) + 1) * interval
+    next_run = now_tw.replace(second=0, microsecond=0) + timedelta(minutes=next_min_total - now_tw.minute)
+    rem_minutes = max(0, int((next_run - now_tw).total_seconds() // 60))
+
+    read_time_str = now_tw.strftime("%m/%d %H:%M:%S")
+    next_time_str = next_run.strftime("%H:%M")
+    return f"⏳ **讀取進度**：`[{bar}] {pct}%`（讀取於 `{read_time_str}`｜下次約 `{next_time_str}`，約 {rem_minutes} 分後）"
 
 
 def load_data():
@@ -18,7 +42,6 @@ def load_data():
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         raw = json.load(f)
 
-    # 相容舊版單一帳本格式，自動轉移到多頻道架構
     if "channels" not in raw:
         channels = {}
         if DEFAULT_CHANNEL_ID:
@@ -27,6 +50,7 @@ def load_data():
                 "settlement_rule": raw.get("settlement_rule", "equal"),
                 "member_count": raw.get("member_count", 0),
                 "last_processed_message_id": raw.get("last_processed_message_id"),
+                "last_daily_noon_date": "",
             }
         return {"channels": channels}
 
@@ -47,12 +71,14 @@ def get_channel_ledger(data, channel_id):
             "settlement_rule": "equal",
             "member_count": 0,
             "last_processed_message_id": None,
+            "last_daily_noon_date": "",
         },
     )
     ledger.setdefault("expenses", [])
     ledger.setdefault("settlement_rule", "equal")
     ledger.setdefault("member_count", 0)
     ledger.setdefault("last_processed_message_id", None)
+    ledger.setdefault("last_daily_noon_date", "")
     return ledger
 
 
@@ -60,7 +86,7 @@ def discord_request(method, path, payload=None):
     url = f"{API_BASE}{path}"
     headers = {
         "Authorization": f"Bot {TOKEN}",
-        "User-Agent": "DormExpenseBot (https://github.com, 2.0)",
+        "User-Agent": "DormExpenseBot (https://github.com, 2.2)",
         "Content-Type": "application/json",
     }
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -80,7 +106,6 @@ def get_target_channels(data):
     if DEFAULT_CHANNEL_ID:
         target_ids.add(DEFAULT_CHANNEL_ID)
 
-    # 自動偵測機器人加入的所有伺服器中，名稱包含「記帳」或「分帳」的文字頻道
     guilds = discord_request("GET", "/users/@me/guilds") or []
     for g in guilds:
         gid = g.get("id")
@@ -88,7 +113,7 @@ def get_target_channels(data):
             continue
         ch_list = discord_request("GET", f"/guilds/{gid}/channels") or []
         for ch in ch_list:
-            if ch.get("type") == 0:  # 文字頻道
+            if ch.get("type") == 0:
                 name = ch.get("name", "")
                 if "記帳" in name or "分帳" in name:
                     target_ids.add(ch["id"])
@@ -110,7 +135,6 @@ def fetch_messages(channel_id, after_id=None):
 def send_message(channel_id, content):
     if not content:
         return
-    # 自動分段發送，避免超過 Discord 2000 字上限
     chunks = []
     current = ""
     for line in content.split("\n"):
@@ -128,7 +152,6 @@ def send_message(channel_id, content):
 
 
 def calculate_transfers(balances):
-    # balances: {人名: 淨額(正數=應收回, 負數=應付出)}
     debtors = [[p, -amt] for p, amt in balances.items() if amt < -0.05]
     creditors = [[p, amt] for p, amt in balances.items() if amt > 0.05]
     debtors.sort(key=lambda x: x[1], reverse=True)
@@ -149,6 +172,39 @@ def calculate_transfers(balances):
         if creditors[j][1] <= 0.05:
             j += 1
     return transfers
+
+
+def build_daily_noon_report(ledger, now_tw):
+    expenses = ledger["expenses"]
+    if not expenses:
+        return None
+
+    totals = {}
+    counts = {}
+    grand_total = 0.0
+    for item in expenses:
+        payer = item["payer"]
+        amount = float(item["amount"])
+        totals[payer] = totals.get(payer, 0.0) + amount
+        counts[payer] = counts.get(payer, 0) + 1
+        grand_total += amount
+
+    ranked = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+    top_person, top_amount = ranked[0]
+
+    lines = [
+        f"🕛 **每日 12:00 吃土榜＆個人財務報表**（{now_tw.strftime('%Y/%m/%d')}）",
+        f"• 本輪累積總支出：**{grand_total:g} 元**（共 {len(expenses)} 筆）",
+        f"• 🫠 **今日最吃土（花最多錢）**：**{top_person}**（已支出 **{top_amount:g} 元**）",
+        "• **個人財務報表**：",
+    ]
+    medals = ["🥇", "🥈", "🥉"]
+    for idx, (person, paid) in enumerate(ranked):
+        badge = medals[idx] if idx < len(medals) else "•"
+        share = (paid / grand_total * 100) if grand_total > 0 else 0.0
+        lines.append(f"  {badge} **{person}**：支出 **{paid:g} 元**（{counts[person]} 筆，佔 {share:.1f}%）")
+
+    return "\n".join(lines)
 
 
 def format_report(ledger):
@@ -172,10 +228,11 @@ def format_report(ledger):
     headcount = configured_count if configured_count >= active_count else active_count
 
     lines = [
-        "📊 **宿舍分帳目前報表**",
+        "📊 **宿舍分帳結算報表**",
         f"• 未結清筆數：{len(expenses)} 筆",
         f"• 總支出金額：**{grand_total:g} 元**",
-        f"• 分攤人數：{headcount} 人" + (f"（已設定固定 {configured_count} 人）" if configured_count > 0 else "（依目前墊付人數自動計算）"),
+        f"• 分攤人數：{headcount} 人"
+        + (f"（已設定固定 {configured_count} 人）" if configured_count > 0 else "（依目前墊付人數自動計算）"),
         "• 各人已墊付：",
     ]
     for person, paid in totals.items():
@@ -221,13 +278,14 @@ def handle_command(normalized_cmd, author, ledger):
 
     if compact in ("!說明", "!指令", "!help", "!功能"):
         return (
-            "📖 **宿舍分帳小管家完整指令說明**\n"
-            "• `金額` 或 `金額 項目`（例如 `280`、`150 衛生紙`）：新增一筆墊付支出\n"
-            "• `!報表`：查看總支出、每人墊付統計與建議轉帳金額\n"
-            "• `!明細`：列出本輪所有已記錄的逐筆支出明細\n"
-            "• `!人數 4`：設定寢室總分攤人數（輸入 `!人數 0` 改回自動依墊付人數計算）\n"
-            "• `!刪除`：刪除最新一筆記帳紀錄（打錯金額時使用）\n"
-            "• `!結清`：顯示最終結算報表並將本輪帳本歸零"
+            "📖 **宿舍分帳小管家指令說明**\n"
+            "• `金額` 或 `金額 項目`（例如 `280`、`150 衛生紙`）：單純記錄一筆支出\n"
+            "• `!結清`：顯示最終結算報表並將本輪帳本歸零\n"
+            "• `!報表`：查看目前分攤試算與建議轉帳\n"
+            "• `!明細`：列出本輪逐筆支出明細\n"
+            "• `!人數 4`：設定寢室總分攤人數（`!人數 0` 改回自動計算）\n"
+            "• `!刪除`：刪除最新一筆記帳紀錄\n"
+            "• 每天 **12:00** 自動發送「吃土榜＋個人財務報表」"
         )
 
     if compact in ("!報表", "!結算", "!統計"):
@@ -265,11 +323,8 @@ def handle_command(normalized_cmd, author, ledger):
     return None
 
 
-def process_channel(channel_id, ledger):
+def process_channel(channel_id, ledger, now_tw):
     messages = fetch_messages(channel_id, ledger.get("last_processed_message_id"))
-    if not messages:
-        return
-
     replies = []
     amount_pattern = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(.*)$")
 
@@ -285,7 +340,6 @@ def process_channel(channel_id, ledger):
         if not raw_content:
             continue
 
-        # 統一將全形驚嘆號轉為半形，確保中文鍵盤輸入也能辨識指令
         normalized = raw_content.replace("！", "!").strip()
 
         if normalized.startswith("!"):
@@ -299,7 +353,6 @@ def process_channel(channel_id, ledger):
             amount = float(match.group(1))
             note = match.group(2).strip() or "一般支出"
             if amount > 0:
-                now_tw = datetime.now(TW_TZ)
                 ledger["expenses"].append(
                     {
                         "payer": author,
@@ -309,9 +362,19 @@ def process_channel(channel_id, ledger):
                         "timestamp": now_tw.isoformat(),
                     }
                 )
+                # 單純記錄，不附加分攤算式
                 replies.append(f"🧾 已記錄 **{author}** 墊付 **{amount:g} 元**（{note}）")
 
+    # 每天 12:00（12:00～12:04 區間）自動發送一次吃土榜與個人財務報表
+    today_str = now_tw.strftime("%Y-%m-%d")
+    if now_tw.hour == 12 and now_tw.minute < 5 and ledger.get("last_daily_noon_date") != today_str:
+        noon_report = build_daily_noon_report(ledger, now_tw)
+        ledger["last_daily_noon_date"] = today_str
+        if noon_report:
+            replies.append(noon_report)
+
     if replies:
+        replies.append(build_read_progress_bar(now_tw))
         send_message(channel_id, "\n\n".join(replies))
 
 
@@ -319,6 +382,7 @@ def main():
     if not TOKEN:
         raise RuntimeError("缺少 DISCORD_TOKEN 環境變數")
 
+    now_tw = datetime.now(TW_TZ)
     data = load_data()
     channel_ids = get_target_channels(data)
     if not channel_ids:
@@ -326,7 +390,7 @@ def main():
 
     for cid in channel_ids:
         ledger = get_channel_ledger(data, cid)
-        process_channel(cid, ledger)
+        process_channel(cid, ledger, now_tw)
 
     save_data(data)
 
