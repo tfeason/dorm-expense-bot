@@ -1,5 +1,12 @@
 {
-  "expenses": [],
+  "expenses": [
+    {
+      "payer": "小澄",
+      "amount": 200.0,
+      "note": "午餐",
+      "timestamp": "2026-11-26T03:49:32.263223+00:00"
+    }
+  ],
   "settlement_rule": "equal",
-  "last_processed_message_id": "1575357104011612181"
+  "last_processed_message_id": "1575357730007285761"
 }
