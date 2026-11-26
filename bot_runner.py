@@ -11,6 +11,7 @@ DATA_FILE = "dorm_data.json"
 API_BASE = "https://discord.com/api/v10"
 TW_TZ = timezone(timedelta(hours=8))
 CRON_INTERVAL_MINUTES = 5
+AUTO_DM_ON_EXPENSE = True
 
 
 def build_read_progress_bar(now_tw=None):
@@ -49,6 +50,7 @@ def load_data():
                 "expenses": raw.get("expenses", []),
                 "settlement_rule": raw.get("settlement_rule", "equal"),
                 "member_count": raw.get("member_count", 0),
+                "personal_budgets": raw.get("personal_budgets", {}),
                 "last_processed_message_id": raw.get("last_processed_message_id"),
                 "last_daily_noon_date": "",
             }
@@ -70,6 +72,7 @@ def get_channel_ledger(data, channel_id):
             "expenses": [],
             "settlement_rule": "equal",
             "member_count": 0,
+            "personal_budgets": {},
             "last_processed_message_id": None,
             "last_daily_noon_date": "",
         },
@@ -77,6 +80,7 @@ def get_channel_ledger(data, channel_id):
     ledger.setdefault("expenses", [])
     ledger.setdefault("settlement_rule", "equal")
     ledger.setdefault("member_count", 0)
+    ledger.setdefault("personal_budgets", {})
     ledger.setdefault("last_processed_message_id", None)
     ledger.setdefault("last_daily_noon_date", "")
     return ledger
@@ -86,7 +90,7 @@ def discord_request(method, path, payload=None):
     url = f"{API_BASE}{path}"
     headers = {
         "Authorization": f"Bot {TOKEN}",
-        "User-Agent": "DormExpenseBot (https://github.com, 2.2)",
+        "User-Agent": "DormExpenseBot (https://github.com, 2.4)",
         "Content-Type": "application/json",
     }
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -134,7 +138,7 @@ def fetch_messages(channel_id, after_id=None):
 
 def send_message(channel_id, content):
     if not content:
-        return
+        return False
     chunks = []
     current = ""
     for line in content.split("\n"):
@@ -147,8 +151,67 @@ def send_message(channel_id, content):
     if current:
         chunks.append(current)
 
+    ok = True
     for chunk in chunks:
-        discord_request("POST", f"/channels/{channel_id}/messages", {"content": chunk})
+        res = discord_request("POST", f"/channels/{channel_id}/messages", {"content": chunk})
+        if res is None:
+            ok = False
+    return ok
+
+
+def send_direct_message(user_id, content):
+    if not user_id or not content:
+        return False
+    dm_channel = discord_request("POST", "/users/@me/channels", {"recipient_id": str(user_id)})
+    if not isinstance(dm_channel, dict) or not dm_channel.get("id"):
+        return False
+    return send_message(dm_channel["id"], content)
+
+
+def get_user_spent(ledger, user_id, author_name):
+    spent = 0.0
+    count = 0
+    for item in ledger.get("expenses", []):
+        item_uid = item.get("payer_id")
+        if item_uid and str(item_uid) == str(user_id):
+            spent += float(item["amount"])
+            count += 1
+        elif not item_uid and item.get("payer") == author_name:
+            spent += float(item["amount"])
+            count += 1
+    return spent, count
+
+
+def build_personal_balance_dm(ledger, user_id, author_name, now_tw, latest_note=None, latest_amount=None):
+    budgets = ledger.get("personal_budgets", {})
+    budget_entry = budgets.get(str(user_id))
+    spent, count = get_user_spent(ledger, user_id, author_name)
+
+    header = (
+        f"🔒 **{author_name} 的記帳後個人剩餘金額更新（僅本人私訊可見）**"
+        if latest_amount is not None
+        else f"🔒 **{author_name} 的專屬個人剩餘金額查詢（僅本人私訊可見）**"
+    )
+    lines = [header]
+    if latest_amount is not None:
+        lines.append(f"• 本次新增：**{float(latest_amount):g} 元**（{latest_note or '一般支出'}）")
+
+    lines.append(f"• 本輪累積花費：**{spent:g} 元**（共 {count} 筆）")
+
+    if budget_entry is None:
+        lines.append("• 尚未設定個人預算上限！輸入 `!預算 5000`（改成你的預算）即可開始追蹤剩餘金額。")
+    else:
+        total_budget = float(budget_entry.get("amount", 0))
+        remaining = total_budget - spent
+        remain_pct = (remaining / total_budget * 100) if total_budget > 0 else 0.0
+        lines.insert(1, f"• 個人設定預算：**{total_budget:g} 元**")
+        if remaining >= 0:
+            lines.append(f"• 剩餘可用金額：**{remaining:g} 元**（剩餘 {remain_pct:.1f}%）")
+        else:
+            lines.append(f"• ⚠️ 已超支：**{abs(remaining):g} 元**（目前餘額為 **{remaining:g} 元**）")
+
+    lines.append(f"• 更新時間：`{now_tw.strftime('%m/%d %H:%M:%S')}`")
+    return "\n".join(lines)
 
 
 def calculate_transfers(balances):
@@ -273,13 +336,15 @@ def format_details(ledger):
     return "\n".join(lines)
 
 
-def handle_command(normalized_cmd, author, ledger):
+def handle_command(normalized_cmd, author, user_id, ledger, now_tw):
     compact = "".join(normalized_cmd.split())
 
     if compact in ("!說明", "!指令", "!help", "!功能"):
         return (
             "📖 **宿舍分帳小管家指令說明**\n"
-            "• `金額` 或 `金額 項目`（例如 `280`、`150 衛生紙`）：單純記錄一筆支出\n"
+            "• `金額` 或 `金額 項目`（例如 `280`、`150 衛生紙`）：單純記錄一筆支出，並私訊更新個人剩餘金額\n"
+            "• `!預算 5000`：設定個人預算上限（各自獨立，不會影響他人）\n"
+            "• `!剩餘`：機器人將**私訊（DM）**你的個人剩餘金額給你本人，頻道不公開\n"
             "• `!結清`：顯示最終結算報表並將本輪帳本歸零\n"
             "• `!報表`：查看目前分攤試算與建議轉帳\n"
             "• `!明細`：列出本輪逐筆支出明細\n"
@@ -287,6 +352,34 @@ def handle_command(normalized_cmd, author, ledger):
             "• `!刪除`：刪除最新一筆記帳紀錄\n"
             "• 每天 **12:00** 自動發送「吃土榜＋個人財務報表」"
         )
+
+    if compact.startswith("!預算") or compact.startswith("!設定預算"):
+        num_str = compact.replace("!設定預算", "").replace("!預算", "").strip()
+        try:
+            budget_val = float(num_str)
+            if budget_val < 0:
+                raise ValueError
+        except ValueError:
+            return "⚠️ 請輸入正確的預算金額，例如：`!預算 5000`"
+
+        budgets = ledger.setdefault("personal_budgets", {})
+        budgets[str(user_id)] = {
+            "name": author,
+            "amount": budget_val,
+            "updated_at": now_tw.isoformat(),
+        }
+        dm_text = build_personal_balance_dm(ledger, user_id, author, now_tw)
+        dm_ok = send_direct_message(user_id, dm_text)
+        if dm_ok:
+            return f"🔒 已更新 **{author}** 的個人預算設定，並已私訊目前的剩餘金額給你本人。"
+        return f"⚙️ 已更新 **{author}** 的個人預算設定（但無法私訊你，請開啟 Discord「允許來自伺服器成員的私人訊息」後再輸入 `!剩餘`）。"
+
+    if compact in ("!剩餘", "!餘額", "!我的", "!個人餘額"):
+        dm_text = build_personal_balance_dm(ledger, user_id, author, now_tw)
+        dm_ok = send_direct_message(user_id, dm_text)
+        if dm_ok:
+            return f"🔒 已將個人剩餘金額私訊給 **{author}**（僅本人私訊可見）。"
+        return f"⚠️ 無法傳送私訊給 **{author}**，請確認你的 Discord 隱私設定已開啟「允許來自伺服器成員的私人訊息」。"
 
     if compact in ("!報表", "!結算", "!統計"):
         return format_report(ledger)
@@ -335,6 +428,7 @@ def process_channel(channel_id, ledger, now_tw):
         if author_info.get("bot"):
             continue
 
+        user_id = str(author_info.get("id", ""))
         author = author_info.get("global_name") or author_info.get("username") or "成員"
         raw_content = (msg.get("content") or "").strip()
         if not raw_content:
@@ -343,7 +437,7 @@ def process_channel(channel_id, ledger, now_tw):
         normalized = raw_content.replace("！", "!").strip()
 
         if normalized.startswith("!"):
-            res = handle_command(normalized, author, ledger)
+            res = handle_command(normalized, author, user_id, ledger, now_tw)
             if res:
                 replies.append(res)
             continue
@@ -356,16 +450,25 @@ def process_channel(channel_id, ledger, now_tw):
                 ledger["expenses"].append(
                     {
                         "payer": author,
+                        "payer_id": user_id,
                         "amount": amount,
                         "note": note,
                         "time_str": now_tw.strftime("%m/%d %H:%M"),
                         "timestamp": now_tw.isoformat(),
                     }
                 )
-                # 單純記錄，不附加分攤算式
                 replies.append(f"🧾 已記錄 **{author}** 墊付 **{amount:g} 元**（{note}）")
+                if AUTO_DM_ON_EXPENSE and user_id:
+                    dm_text = build_personal_balance_dm(
+                        ledger,
+                        user_id,
+                        author,
+                        now_tw,
+                        latest_note=note,
+                        latest_amount=amount,
+                    )
+                    send_direct_message(user_id, dm_text)
 
-    # 每天 12:00（12:00～12:04 區間）自動發送一次吃土榜與個人財務報表
     today_str = now_tw.strftime("%Y-%m-%d")
     if now_tw.hour == 12 and now_tw.minute < 5 and ledger.get("last_daily_noon_date") != today_str:
         noon_report = build_daily_noon_report(ledger, now_tw)
