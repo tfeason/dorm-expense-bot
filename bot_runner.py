@@ -95,7 +95,7 @@ def format_report(data):
 
 
 def handle_command(content, author, data):
-    cmd = content.strip()
+    cmd = content.strip().replace("！", "!")
     if cmd == "!說明":
         return (
             "📖 **宿舍分帳小管家指令說明**\n"
