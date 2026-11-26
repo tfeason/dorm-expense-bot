@@ -1,10 +1,18 @@
 {
   "channels": {
     "1575352286752931932": {
-      "expenses": [],
+      "expenses": [
+        {
+          "payer": "小澄",
+          "amount": 1000000.0,
+          "note": "一般支出",
+          "time_str": "11/26 13:29",
+          "timestamp": "2026-11-26T13:29:41.277743+08:00"
+        }
+      ],
       "settlement_rule": "equal",
       "member_count": 0,
-      "last_processed_message_id": "1575369811792494758",
+      "last_processed_message_id": "1575382400689635361",
       "last_daily_noon_date": ""
     }
   }
